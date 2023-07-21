@@ -41,18 +41,23 @@ const (
 	telemetryReloadWait     = 100 * time.Millisecond
 	maxTelemetryLoadRetries = 20
 
+	logLevelFlagName      = "log-level"
 	prettyLoggingFlagName = "pretty-logging"
 )
 
 var (
-	BuildInfo             node.BuildInfo
-	GitHubAuthDemo        node.GitHubAuthDemo
-	TelemetryClient       telemetry.Client
-	DotEnvFile            string
-	log                   *zap.Logger
-	cmdDurationMetric     telemetry.DurationMetric
-	zapLogLevel           zapcore.Level
-	_wunderGraphDirConfig string
+	BuildInfo         node.BuildInfo
+	GitHubAuthDemo    node.GitHubAuthDemo
+	TelemetryClient   telemetry.Client
+	DotEnvFile        string
+	log               *zap.Logger
+	cmdDurationMetric telemetry.DurationMetric
+	zapLogLevelSetter = zap.NewAtomicLevel()
+	// ignoreLogLevelFromConfig indicates when the logging level has
+	// been provided via command line or environment and the value
+	// in the config should be ignored
+	ignoreLogLevelFromConfig bool
+	_wunderGraphDirConfig    string
 	// otelBatchTimeout is the maximum timeout before a batch of otel data is sent
 	// By default it is 5 seconds but for CI and debugging purposes it should be set much lower
 	otelBatchTimeout time.Duration
@@ -167,6 +172,7 @@ func workaroundBugWithDuplicatedFlags(cmd *cobra.Command) {
 func updateFlagsFromEnvironment(cmd *cobra.Command) {
 	overriddenFlags := map[string]string{
 		prettyLoggingFlagName: helpers.WgLogPrettyEnvKey,
+		logLevelFlagName:      helpers.WgLogEnvKey,
 	}
 	for flagName, envKey := range overriddenFlags {
 		flag := cmd.Flags().Lookup(flagName)
@@ -202,19 +208,25 @@ var rootCmd = &cobra.Command{
 			rootFlags.PrettyLogs = false
 		}
 
-		if rootFlags.DebugMode {
-			// override log level to debug in debug mode
-			rootFlags.CliLogLevel = "debug"
+		logLevelFlag := cmd.Flags().Lookup(logLevelFlagName)
+		if logLevelFlag != nil {
+			if rootFlags.DebugMode && !logLevelFlag.Changed {
+				// Default to debug when no specific level has been given in the command line
+				rootFlags.Log = "debug"
+			}
+			// If the log level has been provided by environment or by command line, ignore the one
+			// in the application config
+			ignoreLogLevelFromConfig = logLevelFlag.Changed || os.Getenv(helpers.WgLogEnvKey) != ""
 		}
 
-		logLevel, err := logging.FindLogLevel(rootFlags.CliLogLevel)
+		logLevel, err := logging.FindLogLevel(rootFlags.Log)
 		if err != nil {
 			return err
 		}
-		zapLogLevel = logLevel
+		zapLogLevelSetter.SetLevel(logLevel)
 
 		log = logging.
-			New(rootFlags.PrettyLogs, rootFlags.DebugMode, zapLogLevel).
+			New(rootFlags.PrettyLogs, rootFlags.DebugMode, zapLogLevelSetter).
 			With(zap.String("component", "@wundergraph/wunderctl"))
 
 		err = godotenv.Load(DotEnvFile)
@@ -378,7 +390,7 @@ func init() {
 	// Can be overwritten by WG_API_URL=<url> env variable
 	viper.SetDefault("API_URL", "https://gateway.wundergraph.com")
 
-	rootCmd.PersistentFlags().StringVarP(&rootFlags.CliLogLevel, "cli-log-level", "l", "info", "Sets the CLI log level")
+	rootCmd.PersistentFlags().StringVarP(&rootFlags.Log, logLevelFlagName, "l", "info", "Sets the log level")
 	rootCmd.PersistentFlags().StringVarP(&DotEnvFile, "env", "e", ".env", "Allows you to load environment variables from an env file. Defaults to .env in the current directory.")
 	rootCmd.PersistentFlags().BoolVar(&rootFlags.DebugMode, "debug", false, "Enables the debug mode so that all requests and responses will be logged")
 	rootCmd.PersistentFlags().BoolVar(&rootFlags.Telemetry, "telemetry", !isTelemetryDisabled, "Enables telemetry. Telemetry allows us to accurately gauge WunderGraph feature usage, pain points, and customization across all users.")
@@ -418,4 +430,10 @@ func configureEmbeddedNatsBlocking(ctx context.Context) {
 	<-ctx.Done()
 	srv.Shutdown()
 	log.Debug("Embedded NATS server stopped")
+}
+
+func updateLoggingLevel(level zapcore.Level) {
+	if !ignoreLogLevelFromConfig {
+		zapLogLevelSetter.SetLevel(level)
+	}
 }

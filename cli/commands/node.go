@@ -87,14 +87,15 @@ func NewWunderGraphNode(ctx context.Context) (*node.Node, string, error) {
 	}
 
 	nodeLogger := logging.
-		New(rootFlags.PrettyLogs, rootFlags.DebugMode, zapLogLevel)
+		New(rootFlags.PrettyLogs, rootFlags.DebugMode, zapLogLevelSetter)
 	return node.New(ctx, BuildInfo, wunderGraphDir, nodeLogger), wunderGraphDir, nil
 }
 
 type options struct {
-	hooksServerHealthCheck bool
-	idleHandler            func()
-	enableRequestLogging   bool
+	hooksServerHealthCheck  bool
+	idleHandler             func()
+	enableRequestLogging    bool
+	serverConfigLoadHandler func(*node.WunderNodeConfig)
 }
 
 type Option func(options *options)
@@ -114,6 +115,12 @@ func WithIdleHandler(idleHandler func()) Option {
 func WithRequestLogging(debugMode bool) Option {
 	return func(options *options) {
 		options.enableRequestLogging = debugMode
+	}
+}
+
+func WithServerConfigLoadHandler(handler func(*node.WunderNodeConfig)) Option {
+	return func(options *options) {
+		options.serverConfigLoadHandler = handler
 	}
 }
 
@@ -156,6 +163,9 @@ func StartWunderGraphNode(n *node.Node, opts ...Option) error {
 		node.WithForceHttpsRedirects(!disableForceHttpsRedirects),
 		node.WithIntrospection(enableIntrospection),
 		node.WithTraceBatchTimeout(otelBatchTimeout),
+		node.WithServerConfigLoadHandler(func(config *node.WunderNodeConfig) {
+			updateLoggingLevel(config.Api.Options.Logging.Level)
+		}),
 	}
 
 	if shutdownAfterIdle > 0 {
